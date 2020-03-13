@@ -1,6 +1,7 @@
 package httpgrpc
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -12,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -23,6 +23,7 @@ import (
 
 	"github.com/fullstorydev/grpchan"
 	"github.com/fullstorydev/grpchan/internal"
+	"github.com/golang/protobuf/proto"
 )
 
 // Mux is a function that can register a gRPC-over-HTTP handler. This is used to
@@ -74,7 +75,28 @@ func HandleMethod(svr interface{}, serviceName string, desc *grpc.MethodDesc, un
 		// check would instead need to also accept a second content-type and the logic below
 		// for consuming the request and sending the response would need to switch based on
 		// the actual version in use.
-		if r.Header.Get("Content-Type") != UnaryRpcContentType_V1 {
+		var unmarshal func([]byte, interface{}) error
+		var marshal func(interface{}) ([]byte, error)
+
+		contentType := r.Header.Get("Content-Type")
+		switch contentType {
+		case UnaryRpcContentType_V1:
+			unmarshal = func(buf []byte, msg interface{}) error {
+				return proto.Unmarshal(buf, msg.(proto.Message))
+			}
+			marshal = func(msg interface{}) ([]byte, error) {
+				return proto.Marshal(msg.(proto.Message))
+			}
+		case GrpcWebJsonContentType_V1, ApplicationJson:
+			unmarshal = func(buf []byte, msg interface{}) error {
+				return jsonUnmarshaler.Unmarshal(bytes.NewReader(buf), msg.(proto.Message))
+			}
+			marshal = func(msg interface{}) ([]byte, error) {
+				var buf bytes.Buffer
+				err := jsonMarshaler.Marshal(&buf, msg.(proto.Message))
+				return buf.Bytes(), err
+			}
+		default:
 			writeError(w, http.StatusUnsupportedMediaType)
 			return
 		}
@@ -91,11 +113,13 @@ func HandleMethod(svr interface{}, serviceName string, desc *grpc.MethodDesc, un
 			return
 		}
 
-		dec := func(msg interface{}) error {
-			return proto.Unmarshal(req, msg.(proto.Message))
-		}
 		sts := internal.UnaryServerTransportStream{Name: fullMethod}
-		resp, err := desc.Handler(svr, grpc.NewContextWithServerTransportStream(ctx, &sts), dec, unaryInt)
+		resp, err := desc.Handler(svr, grpc.NewContextWithServerTransportStream(ctx, &sts), func(msg interface{}) error {
+			if err := unmarshal(req, msg); err != nil {
+				return status.Error(codes.InvalidArgument, err.Error())
+			}
+			return nil
+		}, unaryInt)
 		toHeaders(sts.GetHeaders(), w.Header(), "")
 		toHeaders(sts.GetTrailers(), w.Header(), "X-GRPC-Trailer-")
 		if err != nil {
@@ -106,7 +130,7 @@ func HandleMethod(svr interface{}, serviceName string, desc *grpc.MethodDesc, un
 			statProto := st.Proto()
 			w.Header().Set("X-GRPC-Status", fmt.Sprintf("%d:%s", statProto.Code, statProto.Message))
 			for _, d := range statProto.Details {
-				b, err := proto.Marshal(d)
+				b, err := marshal(d)
 				if err != nil {
 					continue
 				}
@@ -118,13 +142,13 @@ func HandleMethod(svr interface{}, serviceName string, desc *grpc.MethodDesc, un
 			return
 		}
 
-		b, err := proto.Marshal(resp.(proto.Message))
+		b, err := marshal(resp)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Content-Type", UnaryRpcContentType_V1)
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(b)))
 		w.Write(b)
 	}
