@@ -66,6 +66,9 @@ func generateChanStubs(fd *desc.FileDescriptor, names *plugins.GoNames, resp *pl
 	}
 
 	pkg := names.GoPackageForFile(fd)
+	fmt.Println(pkg)
+	fmt.Println(fd.GetPackage())
+	fmt.Println("donee")
 	filename := names.OutputFilenameFor(fd, ".pb.grpchan.go")
 	f := gopoet.NewGoFile(path.Base(filename), pkg.ImportPath, pkg.Name)
 
