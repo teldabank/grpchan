@@ -24,8 +24,10 @@ func doCodeGen(req *plugins.CodeGenRequest, resp *plugins.CodeGenResponse) error
 	if err != nil {
 		return err
 	}
+	fmt.Println(args)
 	names := plugins.GoNames{ImportMap: args.importMap}
 	if args.importPath != "" {
+
 		// if we're overriding import path, go ahead and query
 		// package for each file, which will cache the override name
 		// so all subsequent queries are consistent
